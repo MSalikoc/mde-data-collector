@@ -734,6 +734,58 @@ if ($cat.Count) {
 }
 
 $q = @"
+AlertInfo
+| where Timestamp > ago(${AlertDays}d)
+| summarize Alerts = count() by DetectionSource
+| order by Alerts desc
+"@
+$ds = Invoke-Hunting -Query $q -What 'detection-source'
+if ($ds.Count) {
+    $data.charts['Detection source'] = @($ds | Select-Object -First 6 | ForEach-Object {
+        Write-Output -NoEnumerate @($_.DetectionSource, [int]$_.Alerts)
+    })
+    Write-Ok "$($ds.Count) tespit kaynagi"
+}
+
+# --- AV platform / motor / imza surumleri (best-effort: tablo her tenant'ta olmayabilir)
+$q = @"
+DeviceTvmInfoGathering
+| where Timestamp > ago(7d)
+| summarize arg_max(Timestamp, *) by DeviceId
+| extend AvPlatform = tostring(AdditionalFields.AvPlatformVersion),
+         AvEngine   = tostring(AdditionalFields.AvEngineVersion),
+         AvSig      = tostring(AdditionalFields.AvSignatureVersion)
+| where isnotempty(AvPlatform) or isnotempty(AvEngine) or isnotempty(AvSig)
+| summarize Devices = count() by AvPlatform, AvEngine, AvSig
+| order by Devices desc
+"@
+$ver = Invoke-Hunting -Query $q -What 'av-versions'
+if ($ver.Count) {
+    function VerRow {
+        param([string]$Field, [string]$Label)
+        $groups = $ver | Group-Object $Field | Where-Object { $_.Name } |
+                  ForEach-Object { [pscustomobject]@{ v = $_.Name; n = ($_.Group | Measure-Object Devices -Sum).Sum } }
+        if (-not $groups) { return $null }
+        $sorted = @($groups | Sort-Object { [version]($_.v -replace '[^0-9.]','0') } -Descending -ErrorAction SilentlyContinue)
+        if (-not $sorted) { $sorted = @($groups | Sort-Object n -Descending) }
+        $latest = $sorted[0]
+        $behind = ($groups | Where-Object { $_.v -ne $latest.v } | Measure-Object n -Sum).Sum
+        [pscustomobject]@{
+            component = $Label
+            current   = ($groups | Sort-Object n -Descending | Select-Object -First 1).v
+            latest    = $latest.v
+            behind    = [int]$behind
+        }
+    }
+    $rows = @(VerRow 'AvPlatform' 'Defender AV platform version'; VerRow 'AvEngine' 'Antimalware engine version'; VerRow 'AvSig' 'Security intelligence (signature) version') |
+            Where-Object { $_ }
+    if ($rows.Count) {
+        $data.tables.agentVersions = @($rows)
+        Write-Ok "$($rows.Count) surum bileseni"
+    }
+}
+
+$q = @"
 DeviceEvents
 | where Timestamp > ago(${EventDays}d)
 | where ActionType in ("SmartScreenUrlWarning","SmartScreenAppWarning","ExploitGuardNetworkProtectionBlocked","ExploitGuardNetworkProtectionAudited","NetworkProtectionUserBypassEvent")
