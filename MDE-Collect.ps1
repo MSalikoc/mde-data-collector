@@ -65,6 +65,7 @@ try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
 $script:Tokens = @{}
 $script:RefreshToken = $null
 $script:Warnings = [System.Collections.Generic.List[string]]::new()
+$script:Queries = [System.Collections.Generic.List[object]]::new()
 
 function Write-Step($m) { Write-Host "  → $m" -ForegroundColor Cyan }
 function Write-Ok($m)   { Write-Host "  ✓ $m" -ForegroundColor Green }
@@ -276,6 +277,7 @@ function Try-Api {
 
 function Invoke-Hunting {
     param([string]$Query, [string]$What)
+    $script:Queries.Add([pscustomobject]@{ purpose = $What; query = ($Query.Trim() -replace '\s*\r?\n\s*', ' ') })
     try {
         $r = Invoke-Api -Api graph -Method POST -Uri 'https://graph.microsoft.com/v1.0/security/runHuntingQuery' -Body @{ Query = $Query }
         if ($RawDumpPath) {
@@ -736,6 +738,19 @@ if ($inc) {
     $sinceDt = (Get-Date).AddDays(-$AlertDays)
     $inc = @($inc | Where-Object { $_.createdDateTime -and [datetime]$_.createdDateTime -ge $sinceDt })
 }
+
+# uyari + olay hacmi ayni aylik eksende
+if ($alerts -and $mde) {
+    $am = @($mde | Group-Object { ([datetime]$_.createdDateTime).ToString('yyyy-MM') } | Sort-Object Name)
+    if ($am.Count) {
+        $im = @{}
+        if ($inc) { foreach ($g in @($inc | Group-Object { ([datetime]$_.createdDateTime).ToString('yyyy-MM') })) { $im[$g.Name] = $g.Count } }
+        $data.charts['Alert volume trend'] = @($am | ForEach-Object {
+            $k = $_.Name
+            Write-Output -NoEnumerate @($k, $_.Count, $(if ($im.ContainsKey($k)) { $im[$k] } else { 0 }))
+        })
+    }
+}
 if ($inc) {
     $data.kpi['Incidents (90d)'] = '{0:N0}' -f @($inc).Count
     $byMonth = @($inc) | Group-Object { ([datetime]$_.createdDateTime).ToString('yyyy-MM') } | Sort-Object Name
@@ -1110,6 +1125,7 @@ $data.manual = @(
     'Sentinel connector health and ingestion volume (Azure ARM + Usage table)'
 )
 $data.meta.warnings = @($script:Warnings)
+$data.tables.queries = @($script:Queries)
 
 # ======================================================== ÇIKTI ==========
 $data | ConvertTo-Json -Depth 12 | Set-Content -Path $OutFile -Encoding utf8
