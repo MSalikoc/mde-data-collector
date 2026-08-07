@@ -26,6 +26,11 @@ param(
     # client app kaydınız varsa onu verin (redirect URI gerekmez, device code).
     [string]$ClientId = '04b07795-8ddb-461a-bbee-02f9e1bf7b46',
 
+    # Defender API'si icin uygulama kimligi. Verilirse (veya .mde-app.json'da
+    # varsa) o kaynak icin kullanici oturumu yerine client credentials kullanilir;
+    # cihaz durumu sarti koyan CA politikalari boylece devre disi kalir.
+    [string]$ClientSecret,
+
     # Bos birakilirsa: mde-data-<tenant>-<yyyyMMdd>.json
     [string]$OutFile,
 
@@ -49,6 +54,7 @@ if (-not $PSBoundParameters.ContainsKey('ClientId')) {
         try {
             $saved = Get-Content $appFile -Raw -Encoding utf8 | ConvertFrom-Json
             if ($saved.clientId) { $ClientId = $saved.clientId }
+            if (-not $ClientSecret -and $saved.clientSecret) { $ClientSecret = $saved.clientSecret }
         } catch { }
     }
 }
@@ -71,6 +77,27 @@ function Write-Step($m) { Write-Host "  → $m" -ForegroundColor Cyan }
 function Write-Ok($m)   { Write-Host "  ✓ $m" -ForegroundColor Green }
 function Write-Skip($m) { Write-Host "  ! $m" -ForegroundColor Yellow; $script:Warnings.Add($m) }
 
+
+# Uygulama kimligiyle token al (client credentials).
+# Cihaz durumu / MFA gibi kullanici kosullari uygulanmaz.
+function Get-AppOnlyToken {
+    param([string]$Resource)
+    try {
+        $r = Invoke-RestMethod -Method Post -Uri "https://login.microsoftonline.com/$TenantId/oauth2/v2.0/token" -Body @{
+            client_id     = $ClientId
+            client_secret = $ClientSecret
+            scope         = "$Resource/.default"
+            grant_type    = 'client_credentials'
+        }
+        Write-Verbose "app-only token alindi ($Resource)"
+        return $r.access_token
+    }
+    catch {
+        try { $script:LastTokenError = ($_.ErrorDetails.Message | ConvertFrom-Json).error_description } catch { $script:LastTokenError = $_.Exception.Message }
+        Write-Skip "App-only token alinamadi: $script:LastTokenError"
+        return $null
+    }
+}
 
 # Bir kaynak icin refresh token ile sessizce token al.
 # Once v2 (.default), olmazsa v1 (resource=) denenir: Defender API v1 tabanlidir
@@ -161,10 +188,12 @@ function Get-Token {
     $res = if ($Api -eq 'graph') { 'https://graph.microsoft.com' } else { 'https://api.securitycenter.microsoft.com' }
     if (-not $script:Tokens.ContainsKey($Api)) {
         if ($Api -eq 'mde') {
-            # Ikinci bir cihaz kodu istemiyoruz: Graph oturumundan yenilenemiyorsa
-            # bolumu atla ve sebebini yaz.
+            # 1) app-only (client credentials): CA cihaz durumu sartindan etkilenmez
+            # 2) kullanici oturumundan yenileme
+            # Ikisi de olmazsa bolum atlanir; ikinci cihaz kodu ACILMAZ.
             $t = $null
-            if ($script:RefreshToken) { $t = Get-TokenFromRefresh -Resource $res }
+            if ($ClientSecret) { $t = Get-AppOnlyToken -Resource $res }
+            if (-not $t -and $script:RefreshToken) { $t = Get-TokenFromRefresh -Resource $res }
             if (-not $t) {
                 throw "Defender API token alinamadi. Sebep: $script:LastTokenError"
             }
@@ -188,7 +217,11 @@ function Test-TokenScope {
           'DeviceManagementConfiguration.Read.All', 'Directory.Read.All',
           'Organization.Read.All', 'Policy.Read.All', 'RoleManagement.Read.Directory')
     } else {
-        @('Vulnerability.Read', 'SecurityRecommendation.Read', 'Score.Read', 'Ti.Read')
+        if ($ClientSecret) {
+            @('Vulnerability.Read.All', 'SecurityRecommendation.Read.All', 'Score.Read.All')
+        } else {
+            @('Vulnerability.Read', 'SecurityRecommendation.Read', 'Score.Read', 'Ti.Read')
+        }
     }
 
     $scopes = @()
@@ -197,6 +230,7 @@ function Test-TokenScope {
         switch ($payload.Length % 4) { 2 { $payload += '==' } 3 { $payload += '=' } }
         $claims = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($payload)) | ConvertFrom-Json
         $scopes = @($claims.scp -split ' ' | Where-Object { $_ })
+        if (-not $scopes -and $claims.roles) { $scopes = @($claims.roles) }
         if ($claims.upn) { Write-Verbose "Oturum: $($claims.upn)" }
     } catch {
         Write-Verbose 'Token cozulemedi, izin denetimi atlaniyor.'

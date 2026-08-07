@@ -90,6 +90,20 @@ It is idempotent — running it again reuses the existing registration and fills
 
 If your organisation prefers to create the registration by hand, do that instead and pass `-ClientId <app-id>` to the collector.
 
+### If exposure score, recommendations and indicators come back empty
+
+Those three come from `api.securitycenter.microsoft.com`. In tenants with a Conditional Access policy that requires a registered or compliant device, a token for that resource cannot be issued to a device code sign-in - the flow has no device state to present, so it fails with `AADSTS50131: Device is not in required device state`. Everything else still collects normally.
+
+Device-state policies apply to user sign-ins, not to application identities. Run the registration once more in app-only mode:
+
+```powershell
+.\New-MdeApp.ps1 -TenantId YOUR-TENANT-ID -AppOnly
+```
+
+This adds the Defender **application** permissions (`Vulnerability.Read.All`, `SecurityRecommendation.Read.All`, `Score.Read.All`, `Machine.Read.All`, `AdvancedQuery.Read.All`), grants admin consent for them and creates a client secret, which it writes to `.mde-app.json`. The collector picks it up automatically and uses it for the Defender API only; the rest of the collection still runs as the signed-in user.
+
+> `.mde-app.json` now contains a credential to the tenant. It is excluded by `.gitignore`. Delete the app registration when the engagement is finished.
+
 ## Step 3 · Collect
 
 ```powershell

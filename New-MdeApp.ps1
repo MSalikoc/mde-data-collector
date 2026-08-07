@@ -26,6 +26,13 @@ param(
     [Parameter(Mandatory)][string]$TenantId,
     [string]$Name = 'MDE Health Check Collector',
 
+    # Defender API'si icin uygulama kimligi (client credentials).
+    # Cihaz durumu sarti koyan Conditional Access politikalari app-only
+    # token'lara uygulanmaz - exposure score / oneriler / indicator'lar
+    # ancak bu modda alinabilir.
+    [switch]$AppOnly,
+    [int]$SecretMonths = 12,
+
     # Kaydi olusturmak icin kullanilan public client (Azure CLI).
     # Bu adimda yalnizca dizin yazma yetkisi gerekir; sonrasinda kullanilmaz.
     [string]$BootstrapClientId = '04b07795-8ddb-461a-bbee-02f9e1bf7b46',
@@ -51,6 +58,16 @@ $GRAPH_SCOPES = @(
     'Organization.Read.All'
     'Policy.Read.All'
     'RoleManagement.Read.Directory'
+)
+# App-only modda kullanilan Application izinleri (delegated karsiliklarindan farkli)
+$MDE_ROLES = @(
+    'Vulnerability.Read.All'
+    'SecurityRecommendation.Read.All'
+    'Score.Read.All'
+    'Ti.ReadWrite.All'
+    'Machine.Read.All'
+    'AdvancedQuery.Read.All'
+    'SecurityConfiguration.Read.All'
 )
 $MDE_SCOPES = @(
     'Vulnerability.Read'
@@ -166,6 +183,17 @@ function Resolve-Scopes {
     return $found
 }
 
+function Resolve-Roles {
+    param($Sp, [string[]]$Names, [string]$Label)
+    $found = @(); $miss = @()
+    foreach ($n in $Names) {
+        $r = $Sp.appRoles | Where-Object { $_.value -eq $n } | Select-Object -First 1
+        if ($r) { $found += [pscustomobject]@{ name = $n; id = $r.id } } else { $miss += $n }
+    }
+    if ($miss.Count -gt 0) { Write-Warn "$Label (app-only) - bulunamayan izinler atlandi: $($miss -join ', ')" }
+    return $found
+}
+
 $graphPerms = Resolve-Scopes -Sp $graphSp -Names $GRAPH_SCOPES -Label 'Microsoft Graph'
 $mdePerms = @()
 if ($mdeSp) { $mdePerms = Resolve-Scopes -Sp $mdeSp -Names $MDE_SCOPES -Label 'WindowsDefenderATP' }
@@ -179,11 +207,16 @@ $rra += @{
     resourceAppId  = $GRAPH_APPID
     resourceAccess = @($graphPerms | ForEach-Object { @{ id = $_.id; type = 'Scope' } })
 }
-if ($mdePerms.Count -gt 0) {
-    $rra += @{
-        resourceAppId  = $MDE_APPID
-        resourceAccess = @($mdePerms | ForEach-Object { @{ id = $_.id; type = 'Scope' } })
-    }
+$mdeRoles = @()
+if ($AppOnly -and $mdeSp) {
+    $mdeRoles = Resolve-Roles -Sp $mdeSp -Names $MDE_ROLES -Label 'WindowsDefenderATP'
+    Write-Ok "App-only modu: $($mdeRoles.Count) uygulama izni"
+}
+if ($mdePerms.Count -gt 0 -or $mdeRoles.Count -gt 0) {
+    $access = @()
+    $access += @($mdePerms  | ForEach-Object { @{ id = $_.id; type = 'Scope' } })
+    $access += @($mdeRoles  | ForEach-Object { @{ id = $_.id; type = 'Role' } })
+    $rra += @{ resourceAppId = $MDE_APPID; resourceAccess = $access }
 }
 
 $escaped = $Name.Replace("'", "''")
@@ -260,11 +293,54 @@ function Grant-Consent {
     }
 }
 
+# --- app-only: uygulama izinlerine admin consent (appRoleAssignment) ---
+function Grant-AppRoles {
+    param($ResourceSp, $Roles, [string]$Label)
+    if (-not $ResourceSp -or $Roles.Count -eq 0) { return }
+    $existing = @()
+    try { $existing = (Invoke-Graph -Uri "https://graph.microsoft.com/v1.0/servicePrincipals/$spId/appRoleAssignments").value } catch { }
+    $added = 0
+    foreach ($r in $Roles) {
+        if ($existing | Where-Object { $_.appRoleId -eq $r.id -and $_.resourceId -eq $ResourceSp.id }) { continue }
+        try {
+            Invoke-Graph -Uri "https://graph.microsoft.com/v1.0/servicePrincipals/$spId/appRoleAssignments" -Method POST -Body @{
+                principalId = $spId
+                resourceId  = $ResourceSp.id
+                appRoleId   = $r.id
+            } | Out-Null
+            $added++
+        }
+        catch { Write-Warn "$Label - $($r.name) atanamadi: $($_.Exception.Message)" }
+    }
+    Write-Ok "$Label - $added uygulama izni atandi (toplam $($Roles.Count))"
+}
+
 Grant-Consent -ResourceSp $graphSp -Perms $graphPerms -Label 'Microsoft Graph'
 Grant-Consent -ResourceSp $mdeSp   -Perms $mdePerms   -Label 'WindowsDefenderATP'
 
+if ($AppOnly) {
+    Grant-AppRoles -ResourceSp $mdeSp -Roles $mdeRoles -Label 'WindowsDefenderATP'
+
+    Write-Step 'Client secret olusturuluyor'
+    $secret = $null
+    try {
+        $pw = Invoke-Graph -Uri "https://graph.microsoft.com/v1.0/applications/$($app.id)/addPassword" -Method POST -Body @{
+            passwordCredential = @{
+                displayName   = 'MDE collector'
+                endDateTime   = (Get-Date).AddMonths($SecretMonths).ToUniversalTime().ToString('o')
+            }
+        }
+        $secret = $pw.secretText
+        Write-Ok "Secret olusturuldu, $SecretMonths ay gecerli"
+    }
+    catch {
+        Write-Warn "Secret olusturulamadi: $($_.Exception.Message)"
+    }
+}
+
 # ------------------------------------------------------------------ CIKTI -
 $result = [ordered]@{
+    authMode    = $(if ($AppOnly) { 'appOnly' } else { 'deviceCode' })
     clientId    = $app.appId
     objectId    = $app.id
     displayName = $Name
@@ -272,6 +348,9 @@ $result = [ordered]@{
     createdUtc  = (Get-Date).ToUniversalTime().ToString('u')
     graphScopes = @($graphPerms.name)
     mdeScopes   = @($mdePerms.name)
+    mdeRoles    = @($mdeRoles.name)
+    clientSecret = $secret
+    secretExpires = $(if ($secret) { (Get-Date).AddMonths($SecretMonths).ToString('yyyy-MM-dd') } else { $null })
 }
 $result | ConvertTo-Json -Depth 5 | Set-Content -Path $OutFile -Encoding utf8
 
@@ -285,6 +364,11 @@ Write-Host '  Simdi calistirin:' -ForegroundColor White
 Write-Host "   .\MDE-Collect.ps1 -TenantId $TenantId" -ForegroundColor Gray
 Write-Host ''
 Write-Host '  Not: consent yeni verildiyse yayilmasi 1-2 dakika surebilir.' -ForegroundColor DarkGray
+if ($AppOnly -and $secret) {
+    Write-Host ''
+    Write-Host '  ! .mde-app.json artik bir client secret iceriyor - musteri tenantina' -ForegroundColor Yellow
+    Write-Host '    erisim saglar. Engagement bitince app kaydini silin.' -ForegroundColor Yellow
+}
 Write-Host ''
 
 return [pscustomobject]$result
