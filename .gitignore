@@ -1,0 +1,11 @@
+# Collected tenant data - never commit
+mde-data-*.json
+mde-assessment-data.json
+smoke.json
+raw/
+
+# App registration output (contains the client ID)
+.mde-app.json
+
+.DS_Store
+Thumbs.db
