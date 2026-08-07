@@ -436,7 +436,7 @@ if ($cfg.Count) {
     foreach ($k in $kb) { $names[$k.ConfigurationId] = $k.ConfigurationName }
 
     $data.tables.secureConfiguration = @($cfg | ForEach-Object {
-        [ordered]@{
+        [pscustomobject][ordered]@{
             id          = $_.ConfigurationId
             name        = if ($names.ContainsKey($_.ConfigurationId)) { $names[$_.ConfigurationId] } else { $_.ConfigurationId }
             category    = $_.ConfigurationCategory
@@ -486,15 +486,19 @@ $asr = Invoke-Hunting -Query $q -What 'asr-events'
 if ($asr.Count) {
     $data.tables.asrEvents = @($asr | ForEach-Object {
         $mode = if ($_.ActionType -match 'Audited$') { 'Audit' } elseif ($_.ActionType -match 'Blocked$') { 'Block' } else { 'Other' }
-        [ordered]@{
+        [pscustomobject][ordered]@{
             rule    = ($_.ActionType -replace '^Asr', '' -replace '(Audited|Blocked)$', '')
             mode    = $mode
             events  = [int]$_.Events
             devices = [int]$_.Devices
         }
     })
-    $blockRules = @($data.tables.asrEvents | Where-Object mode -eq 'Block' | Select-Object -ExpandProperty rule -Unique)
-    $auditRules = @($data.tables.asrEvents | Where-Object mode -eq 'Audit' | Select-Object -ExpandProperty rule -Unique |
+    # NOT: satirlar [ordered] hashtable; Select-Object -ExpandProperty hashtable'da
+    # calismaz ("Property rule cannot be found"). Uye erisimi ForEach-Object ile yapilir.
+    $blockRules = @($data.tables.asrEvents | Where-Object { $_.mode -eq 'Block' } |
+                    ForEach-Object { $_.rule } | Select-Object -Unique)
+    $auditRules = @($data.tables.asrEvents | Where-Object { $_.mode -eq 'Audit' } |
+                    ForEach-Object { $_.rule } | Select-Object -Unique |
                     Where-Object { $_ -notin $blockRules })
     $data.kpi['Rules in block mode'] = $blockRules.Count
     $data.kpi['Rules in audit mode'] = $auditRules.Count
@@ -504,7 +508,7 @@ if ($asr.Count) {
         @('Warn', 0),
         @('Not configured', [math]::Max(0, 20 - $blockRules.Count - $auditRules.Count)))
     $data.charts['Top audited attack vectors (30 days)'] = @(
-        $data.tables.asrEvents | Where-Object mode -eq 'Audit' | Sort-Object events -Descending |
+        $data.tables.asrEvents | Where-Object { $_.mode -eq 'Audit' } | Sort-Object { $_.events } -Descending |
         Select-Object -First 5 | ForEach-Object { , @($_.rule, [int]$_.events) })
     Write-Ok "$($data.tables.asrEvents.Count) ASR olay tipi — block: $($blockRules.Count), audit: $($auditRules.Count)"
     $script:Warnings.Add('ASR: rules that generate no events are invisible in telemetry - verify rule modes against the Intune policy export.')
@@ -738,7 +742,7 @@ if ($pol) {
             if ($json -match 'excluded(path|extension|process)') {
                 foreach ($m in [regex]::Matches($json, '"value"\s*:\s*"([^"]{3,})"')) {
                     $v = $m.Groups[1].Value
-                    if ($v -match '\\|\.\w{2,4}$') { $exclusions.Add([ordered]@{ policy = $p.name; value = $v }) }
+                    if ($v -match '\\|\.\w{2,4}$') { $exclusions.Add([pscustomobject][ordered]@{ policy = $p.name; value = $v }) }
                 }
             }
 
