@@ -601,6 +601,38 @@ DeviceTvmSoftwareInventory
 $sw = Invoke-Hunting -Query $q -What 'software-count'
 if ($sw.Count) { $data.kpi['Software products'] = '{0:N0}' -f [int]$sw[0].Products }
 
+# --- TVM ek yuzeyler: firmware, tarayici eklentileri, sertifikalar ---
+# Bunlar Advanced Hunting'den gelir; bloke olan Defender API'sine ihtiyac duymaz.
+$q = @"
+DeviceTvmHardwareFirmware
+| where ComponentType in ("Firmware", "Bios")
+| summarize Devices = dcount(DeviceId) by ComponentManufacturer
+| order by Devices desc
+| take 6
+"@
+$fw = Invoke-Hunting -Query $q -What 'firmware'
+if ($fw.Count) {
+    $data.charts['Firmware / hardware advisories by manufacturer'] = @($fw | ForEach-Object {
+        Write-Output -NoEnumerate @($_.ComponentManufacturer, [int]$_.Devices)
+    })
+    Write-Ok "$($fw.Count) firmware ureticisi"
+}
+
+$q = @"
+DeviceTvmBrowserExtensions
+| summarize Extensions = dcount(ExtensionId), Devices = dcount(DeviceId)
+"@
+$be = Invoke-Hunting -Query $q -What 'browser-extensions'
+if ($be.Count) { $data.kpi['Browser extensions'] = "$([int]$be[0].Extensions)" }
+
+$q = @"
+DeviceTvmCertificateInfo
+| where ExpirationDate < now(+90d)
+| summarize Certificates = dcount(Thumbprint)
+"@
+$ci = Invoke-Hunting -Query $q -What 'certificates'
+if ($ci.Count) { $data.kpi['Certificates expiring 90d'] = "$([int]$ci[0].Certificates)" }
+
 # ==================================================== 6 · SECURE SCORE ====
 Write-Step 'Microsoft Secure Score'
 $ss = Try-Api { Invoke-Api -Uri 'https://graph.microsoft.com/v1.0/security/secureScores?$top=1' } 'Secure Score'
@@ -654,6 +686,14 @@ if ($alerts) {
         @('Resolved',    @($mde | Where-Object status -eq 'resolved').Count),
         @('In progress', @($mde | Where-Object status -eq 'inProgress').Count),
         @('New',         @($mde | Where-Object status -eq 'new').Count))
+
+    # yanlis pozitif orani (classification alani)
+    $fp = @($mde | Where-Object { $_.classification -eq 'falsePositive' }).Count
+    $cls = @($mde | Where-Object { $_.classification -and $_.classification -ne 'unknown' }).Count
+    if ($cls -gt 0) {
+        $data.charts['False positive rate'] = @(, @('FP rate %', [math]::Round(100 * $fp / $cls)))
+        $data.kpi['False positive rate'] = "$([math]::Round(100 * $fp / $cls))%"
+    }
 
     # MITRE taktikleri — alert.category taktiğe karşılık gelir (CredentialAccess, LateralMovement…)
     $tactics = @{}
