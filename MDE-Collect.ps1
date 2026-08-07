@@ -70,6 +70,47 @@ function Write-Step($m) { Write-Host "  → $m" -ForegroundColor Cyan }
 function Write-Ok($m)   { Write-Host "  ✓ $m" -ForegroundColor Green }
 function Write-Skip($m) { Write-Host "  ! $m" -ForegroundColor Yellow; $script:Warnings.Add($m) }
 
+
+# Bir kaynak icin refresh token ile sessizce token al.
+# Once v2 (.default), olmazsa v1 (resource=) denenir: Defender API v1 tabanlidir
+# ve bazi tenant'larda v2 .default ile yenilenemez.
+function Get-TokenFromRefresh {
+    param([string]$Resource)
+    $script:LastTokenError = $null
+
+    try {
+        $r = Invoke-RestMethod -Method Post -Uri "https://login.microsoftonline.com/$TenantId/oauth2/v2.0/token" -Body @{
+            client_id     = $ClientId
+            grant_type    = 'refresh_token'
+            refresh_token = $script:RefreshToken
+            scope         = "$Resource/.default offline_access"
+        }
+        if ($r.refresh_token) { $script:RefreshToken = $r.refresh_token }
+        return $r.access_token
+    }
+    catch {
+        try { $script:LastTokenError = ($_.ErrorDetails.Message | ConvertFrom-Json).error_description } catch { $script:LastTokenError = $_.Exception.Message }
+        Write-Verbose "v2 refresh basarisiz ($Resource): $script:LastTokenError"
+    }
+
+    try {
+        $r = Invoke-RestMethod -Method Post -Uri "https://login.microsoftonline.com/$TenantId/oauth2/token" -Body @{
+            client_id     = $ClientId
+            grant_type    = 'refresh_token'
+            refresh_token = $script:RefreshToken
+            resource      = $Resource
+        }
+        if ($r.refresh_token) { $script:RefreshToken = $r.refresh_token }
+        Write-Verbose "v1 refresh basarili ($Resource)"
+        return $r.access_token
+    }
+    catch {
+        try { $script:LastTokenError = ($_.ErrorDetails.Message | ConvertFrom-Json).error_description } catch { $script:LastTokenError = $_.Exception.Message }
+        Write-Verbose "v1 refresh basarisiz ($Resource): $script:LastTokenError"
+    }
+    return $null
+}
+
 # ---------------------------------------------------------------- AUTH ----
 function Get-DeviceCodeToken {
     param([string]$Resource)
@@ -78,18 +119,8 @@ function Get-DeviceCodeToken {
 
     # Elimizde refresh token varsa yeni cihaz kodu istemeden yenile
     if ($script:RefreshToken) {
-        try {
-            $r = Invoke-RestMethod -Method Post -Uri "https://login.microsoftonline.com/$TenantId/oauth2/v2.0/token" -Body @{
-                client_id     = $ClientId
-                grant_type    = 'refresh_token'
-                refresh_token = $script:RefreshToken
-                scope         = $scope
-            }
-            if ($r.refresh_token) { $script:RefreshToken = $r.refresh_token }
-            return $r.access_token
-        } catch {
-            Write-Verbose "Refresh token '$Resource' için kullanılamadı, cihaz kodu isteniyor."
-        }
+        $t = Get-TokenFromRefresh -Resource $Resource
+        if ($t) { return $t }
     }
 
     $dc = Invoke-RestMethod -Method Post -Uri "https://login.microsoftonline.com/$TenantId/oauth2/v2.0/devicecode" -Body @{
@@ -128,7 +159,19 @@ function Get-Token {
     param([ValidateSet('graph', 'mde')][string]$Api)
     $res = if ($Api -eq 'graph') { 'https://graph.microsoft.com' } else { 'https://api.securitycenter.microsoft.com' }
     if (-not $script:Tokens.ContainsKey($Api)) {
-        $script:Tokens[$Api] = Get-DeviceCodeToken -Resource $res
+        if ($Api -eq 'mde') {
+            # Ikinci bir cihaz kodu istemiyoruz: Graph oturumundan yenilenemiyorsa
+            # bolumu atla ve sebebini yaz.
+            $t = $null
+            if ($script:RefreshToken) { $t = Get-TokenFromRefresh -Resource $res }
+            if (-not $t) {
+                throw "Defender API token alinamadi. Sebep: $script:LastTokenError"
+            }
+            $script:Tokens[$Api] = $t
+        }
+        else {
+            $script:Tokens[$Api] = Get-DeviceCodeToken -Resource $res
+        }
         Test-TokenScope -Api $Api -Token $script:Tokens[$Api]
     }
     return $script:Tokens[$Api]
