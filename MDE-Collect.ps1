@@ -502,15 +502,17 @@ if ($cfg.Count) {
     $data.charts['Overall configuration compliance'] = @(, @('Compliance %', $overall))
 
     # tekil AV kontrolleri KPI'ya
-    function CfgPct([string]$match) {
-        $r = $data.tables.secureConfiguration | Where-Object { $_.name -match $match } | Select-Object -First 1
+    # NOT: isim regex'i yanlis satiri yakalayabiliyor (ornegin 'tamper' -> LDAP
+    # "tampering" satiri). Microsoft'un sabit scid kimlikleri kullanilir.
+    function CfgPctById([string]$Scid) {
+        $r = $data.tables.secureConfiguration | Where-Object { $_.id -eq $Scid } | Select-Object -First 1
         if ($r) { "$([math]::Round($r.compliance))%" } else { $null }
     }
     foreach ($p in @(
-        @{ k = 'Real-time protection on'; m = 'real-?time' },
-        @{ k = 'Cloud protection on';     m = 'cloud' },
-        @{ k = 'Tamper protection on';    m = 'tamper' })) {
-        $v = CfgPct $p.m
+        @{ k = 'Real-time protection on'; id = 'scid-2012' },
+        @{ k = 'Cloud protection on';     id = 'scid-2016' },
+        @{ k = 'Tamper protection on';    id = 'scid-2003' })) {
+        $v = CfgPctById $p.id
         if ($v) { $data.kpi[$p.k] = $v }
     }
     Write-Ok "$($cfg.Count) yapılandırma kontrolü, ortalama uyum %$overall"
