@@ -310,7 +310,7 @@ function Try-Api {
 }
 
 function Invoke-Hunting {
-    param([string]$Query, [string]$What)
+    param([string]$Query, [string]$What, [switch]$Optional)
     $script:Queries.Add([pscustomobject]@{ purpose = $What; query = ($Query.Trim() -replace '\s*\r?\n\s*', ' ') })
     try {
         $r = Invoke-Api -Api graph -Method POST -Uri 'https://graph.microsoft.com/v1.0/security/runHuntingQuery' -Body @{ Query = $Query }
@@ -320,7 +320,18 @@ function Invoke-Hunting {
         }
         return @($r.results)
     } catch {
-        Write-Skip "Advanced Hunting '$What' başarısız: $($_.Exception.Message.Split([Environment]::NewLine)[0])"
+        $msg = $_.Exception.Message.Split([Environment]::NewLine)[0]
+        $code = $null
+        try { $code = $_.Exception.Response.StatusCode.value__ } catch { }
+        # 400 + opsiyonel tablo = tenant'ta o yetkilendirme yok (Defender Vulnerability
+        # Management add-on'u gibi). Bu bir hata degil, kapsam bilgisidir.
+        if ($Optional -and $code -eq 400) {
+            Write-Host "  · ${What}: bu tenant'ta yetkilendirme yok, atlandi" -ForegroundColor DarkGray
+            $script:Warnings.Add("$What is not available in this tenant (the table requires an entitlement that is not licensed) - the related section is left empty rather than reported as a failure.")
+        }
+        else {
+            Write-Skip "Advanced Hunting '$What' başarısız: $msg"
+        }
         return @()
     }
 }
@@ -646,7 +657,7 @@ DeviceTvmHardwareFirmware
 | order by Devices desc
 | take 6
 "@
-$fw = Invoke-Hunting -Query $q -What 'firmware'
+$fw = Invoke-Hunting -Query $q -What 'firmware' -Optional
 if ($fw.Count) {
     $data.charts['Firmware / hardware advisories by manufacturer'] = @($fw | ForEach-Object {
         Write-Output -NoEnumerate @($_.ComponentManufacturer, [int]$_.Devices)
@@ -658,7 +669,7 @@ $q = @"
 DeviceTvmBrowserExtensions
 | summarize Extensions = dcount(ExtensionId), Devices = dcount(DeviceId)
 "@
-$be = Invoke-Hunting -Query $q -What 'browser-extensions'
+$be = Invoke-Hunting -Query $q -What 'browser-extensions' -Optional
 if ($be.Count) { $data.kpi['Browser extensions'] = "$([int]$be[0].Extensions)" }
 
 $q = @"
@@ -666,7 +677,7 @@ DeviceTvmCertificateInfo
 | where ExpirationDate < now(+90d)
 | summarize Certificates = dcount(Thumbprint)
 "@
-$ci = Invoke-Hunting -Query $q -What 'certificates'
+$ci = Invoke-Hunting -Query $q -What 'certificates' -Optional
 if ($ci.Count) { $data.kpi['Certificates expiring 90d'] = "$([int]$ci[0].Certificates)" }
 
 # ==================================================== 6 · SECURE SCORE ====
@@ -848,7 +859,7 @@ DeviceTvmInfoGathering
 | summarize Devices = count() by AvPlatform, AvEngine, AvSig
 | order by Devices desc
 "@
-$ver = Invoke-Hunting -Query $q -What 'av-versions'
+$ver = Invoke-Hunting -Query $q -What 'av-versions' -Optional
 if ($ver.Count) {
     function VerRow {
         param([string]$Field, [string]$Label)
