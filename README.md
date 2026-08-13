@@ -82,7 +82,11 @@ A device code appears; sign in at <https://microsoft.com/devicelogin> with a **G
 
 It is idempotent — running it again reuses the existing registration and fills in anything missing.
 
-### Permissions requested (all delegated, all read-only)
+> **If the tenant enforces device-based Conditional Access, add `-AppOnly` now** rather than waiting for the collection to fail. A device code sign-in cannot satisfy a policy that requires a registered or compliant device, and four of the Defender datasets will fail with `AADSTS50131`. See [app-only mode](#if-exposure-score-recommendations-and-indicators-come-back-empty) below. Adding it costs nothing if the tenant turns out not to need it.
+
+### Permissions requested by the default run (delegated, read-only)
+
+These are what a plain `New-MdeApp.ps1` asks for. `-AppOnly` adds application roles on top; they are listed separately below because one of them is not read-only.
 
 **Microsoft Graph:** `ThreatHunting.Read.All`, `SecurityEvents.Read.All`, `SecurityAlert.Read.All`, `SecurityIncident.Read.All`, `CustomDetection.Read.All`, `DeviceManagementConfiguration.Read.All`, `Directory.Read.All`, `Organization.Read.All`, `Policy.Read.All`, `RoleManagement.Read.Directory`
 
@@ -100,9 +104,27 @@ Device-state policies apply to user sign-ins, not to application identities. Run
 .\New-MdeApp.ps1 -TenantId YOUR-TENANT-ID -AppOnly
 ```
 
-This adds the Defender **application** permissions (`Vulnerability.Read.All`, `SecurityRecommendation.Read.All`, `Score.Read.All`, `Machine.Read.All`, `AdvancedQuery.Read.All`), grants admin consent for them and creates a client secret, which it writes to `.mde-app.json`. The collector picks it up automatically and uses it for the Defender API only; the rest of the collection still runs as the signed-in user.
+This adds the Defender **application** permissions, grants admin consent for them and creates a client secret, which it writes to `.mde-app.json`. The collector picks it up automatically and uses it for the Defender API only; the rest of the collection still runs as the signed-in user.
+
+| Application permission | Used for |
+|---|---|
+| `Score.Read.All` | exposure score, configuration score |
+| `SecurityRecommendation.Read.All` | security recommendations |
+| `SecurityConfiguration.Read.All` | secure configuration assessment |
+| `Vulnerability.Read.All` | vulnerable software and CVEs |
+| `Machine.Read.All` | device inventory |
+| `AdvancedQuery.Read.All` | Advanced Hunting |
+| `Ti.ReadWrite.All` | threat indicators |
+
+Watch the console: it prints `N uygulama izni atandi (toplam 7)`. If N is not 7, or a permission is listed as skipped, stop there — consent is incomplete and the data will not arrive.
+
+> **`Ti.ReadWrite.All` is a read-write permission and your security team will see it on the consent screen.** WindowsDefenderATP publishes no read-only *application* role for indicators — the read-only `Ti.Read` exists for delegated access only. The collector never writes; if granting write is unacceptable, remove `Ti.ReadWrite.All` from `$MDE_ROLES` in `New-MdeApp.ps1` and the indicator section stays empty while everything else still collects.
 
 > `.mde-app.json` now contains a credential to the tenant. It is excluded by `.gitignore`. Delete the app registration when the engagement is finished.
+
+### If a section comes back empty rather than failing
+
+An empty result is not the same as a blocked one, and it is the more dangerous of the two: a report that says "no security recommendations" reads as good news. If **Defender RBAC** is enabled, the collecting identity — user or application — must be scoped to all device groups, otherwise the API answers successfully with nothing. The collector now says so when recommendations come back empty. Widen the scope and collect again before accepting a zero.
 
 ## Step 3 · Collect
 
@@ -148,6 +170,9 @@ Send `mde-data-<tenant>-<date>.json` to the assessor. It is plain text — open 
 | `AADSTS65001` / `invalid_client` | App registration missing or consent not granted → Step 2 |
 | Most calls return `403` | The token has no Defender permissions → Step 2. The script lists what is missing before it starts |
 | `403` only on securitycenter calls | Continue with `-GraphOnly`; the exposure score will be absent |
+| `AADSTS50131: Device is not in required device state` | A Conditional Access policy requires a registered or compliant device, which a device code sign-in can never present. Re-run Step 2 with `-AppOnly` — application identities have no device to evaluate. Being excluded from *a* policy is not enough: another policy may scope the Defender app specifically. To find which one, search the Entra sign-in logs by the Correlation ID printed in the error and read the Conditional Access tab |
+| Same error *with* a client secret in place | The secret has expired or consent was never granted for the application permissions → re-run `New-MdeApp.ps1 -AppOnly` |
+| Recommendations or indicators return zero rows | Not a permission problem — see [empty rather than failing](#if-a-section-comes-back-empty-rather-than-failing) |
 | Advanced Hunting returns nothing | `ThreatHunting.Read.All` consent missing, or Defender RBAC is restricting the account |
 | Alert collection takes too long | Use `-AlertDays 30` |
 
