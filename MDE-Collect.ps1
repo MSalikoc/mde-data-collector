@@ -195,6 +195,25 @@ function Get-Token {
             if ($ClientSecret) { $t = Get-AppOnlyToken -Resource $res }
             if (-not $t -and $script:RefreshToken) { $t = Get-TokenFromRefresh -Resource $res }
             if (-not $t) {
+                # AADSTS50131 = tenant'ta kayitli/bilinen cihaz sarti koşan bir Conditional
+                # Access politikasi var. Cihaz kodu akisi bunu HICBIR ZAMAN saglayamaz; token
+                # politikanin guvendigi cihaza degil, oturumun acildigi makineye verilir.
+                # App-only (client credentials) akisinda ortada cihaz yoktur, sart uygulanmaz.
+                if ("$script:LastTokenError" -match 'AADSTS50131|device state') {
+                    if (-not $ClientSecret) {
+                        throw ("Defender API bir Conditional Access politikasi tarafindan engellendi " +
+                               "(AADSTS50131: cihaz kayitli degil). Cihaz kodu ile bu asilamaz. " +
+                               "Cozum: once .\New-MdeApp.ps1 -TenantId $TenantId -AppOnly calistirin " +
+                               "(Global Administrator gerekir), sonra bu komutu tekrarlayin - " +
+                               "olusan .mde-app.json otomatik okunur. " +
+                               "Politikayi tespit etmek icin Entra oturum acma gunluklerinde " +
+                               "Correlation ID ile arayin. Ham hata: $script:LastTokenError")
+                    }
+                    throw ("Defender API app-only token'i da reddedildi (AADSTS50131). Client secret " +
+                           "suresi dolmus olabilir ya da uygulama izinleri onaylanmamis olabilir - " +
+                           ".\New-MdeApp.ps1 -AppOnly komutunu tekrar calistirin. " +
+                           "Ham hata: $script:LastTokenError")
+                }
                 throw "Defender API token alinamadi. Sebep: $script:LastTokenError"
             }
             $script:Tokens[$Api] = $t
@@ -302,8 +321,12 @@ function Invoke-Api {
 
 function Try-Api {
     param([scriptblock]$Block, [string]$What)
+    # PowerShell bos diziyi $null'a cokertir, yani donen deger "cagri dustu" ile
+    # "cagri calisti ama sonuc bos"u ayirt etmeye yetmez. Bayrak bunun icin.
+    $script:LastApiFailed = $false
     try { & $Block }
     catch {
+        $script:LastApiFailed = $true
         Write-Skip "$What alınamadı: $($_.Exception.Message.Split([Environment]::NewLine)[0])"
         $null
     }
@@ -325,7 +348,10 @@ function Invoke-Hunting {
         try { $code = $_.Exception.Response.StatusCode.value__ } catch { }
         # 400 + opsiyonel tablo = tenant'ta o yetkilendirme yok (Defender Vulnerability
         # Management add-on'u gibi). Bu bir hata degil, kapsam bilgisidir.
-        if ($Optional -and $code -eq 400) {
+        # StatusCode bazi PowerShell/HTTP yigin kombinasyonlarinda cozulemiyor ve tespit
+        # sessizce basarisiz oluyordu - o zaman mesaj metnine de bakiyoruz.
+        $is400 = ($code -eq 400) -or ($msg -match '\b400\b|Bad Request')
+        if ($Optional -and $is400) {
             Write-Host "  · ${What}: bu tenant'ta yetkilendirme yok, atlandi" -ForegroundColor DarkGray
             $script:Warnings.Add("$What is not available in this tenant (the table requires an entitlement that is not licensed) - the related section is left empty rather than reported as a failure.")
         }
@@ -1045,6 +1071,12 @@ if (-not $GraphOnly) {
                 }
             })
         Write-Ok "$(@($rec).Count) güvenlik önerisi"
+    }
+    # Cagri basarili ama sonuc bos: Defender RBAC acikken kimlik hicbir cihaz grubuna
+    # kapsanmamis olabilir. API 403 degil BOS doner ve rapor bunu "sifir bulgu" diye
+    # yazar - izinsizlikten cok daha sinsi bir hata. Ayirt edemedigimizi soyluyoruz.
+    elseif (-not $script:LastApiFailed) {
+        Write-Skip 'Security recommendations came back empty rather than failing. If Defender RBAC is enabled, the collecting identity may not be scoped to any device group - widen the scope and re-run before the report states there are none.'
     }
     $ind = Try-Api { Invoke-Api -Api mde -Uri 'https://api.securitycenter.microsoft.com/api/indicators' } 'indicators'
     if ($ind) {
