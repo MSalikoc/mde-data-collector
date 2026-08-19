@@ -108,6 +108,7 @@ function Get-GraphToken {
     Write-Host ''
 
     $deadline = (Get-Date).AddSeconds([int]$dc.expires_in)
+    $softFail = 0
     while ((Get-Date) -lt $deadline) {
         Start-Sleep -Seconds ([int]$dc.interval + 1)
         try {
@@ -119,11 +120,41 @@ function Get-GraphToken {
             return $tok.access_token
         }
         catch {
-            $err = $null
-            try { $err = ($_.ErrorDetails.Message | ConvertFrom-Json).error } catch { }
-            if ($err -eq 'authorization_pending') { continue }
-            if ($err -eq 'slow_down') { Start-Sleep 5; continue }
-            throw "Giris basarisiz: $err"
+            # Hata govdesi HER ZAMAN JSON degildir: proxy, TLS kesintisi ya da bos govde
+            # geldiginde eski kod $err'i bos birakip "Giris basarisiz:" diye hicbir sey
+            # soylemeden oluyordu. Ne bulabilirsek topluyoruz.
+            $err = $null; $desc = $null; $raw = $null; $code = $null
+            try { $raw = $_.ErrorDetails.Message } catch { }
+            if (-not $raw) { try { $raw = $_.Exception.Message } catch { } }
+            try { $j = $raw | ConvertFrom-Json; $err = $j.error; $desc = $j.error_description } catch { }
+            try { $code = $_.Exception.Response.StatusCode.value__ } catch { }
+
+            if ($err -eq 'authorization_pending') { $softFail = 0; continue }
+            if ($err -eq 'slow_down') { $softFail = 0; Start-Sleep 5; continue }
+
+            # OAuth'un kesin reddi: beklemenin anlami yok
+            if ($err -in @('authorization_declined', 'expired_token', 'access_denied',
+                           'invalid_grant', 'bad_verification_code', 'invalid_client',
+                           'unauthorized_client', 'invalid_request')) {
+                $detail = @($desc, $raw) | Where-Object { $_ } | Select-Object -First 1
+                if ($err -in @('invalid_client', 'unauthorized_client')) {
+                    Write-Host ''
+                    Write-Warn ("Bu tenant Azure CLI uygulamasina (varsayilan bootstrap) izin vermiyor olabilir. " +
+                                "Kendi public client app kaydinizi olusturup -BootstrapClientId <app-id> ile verin.")
+                }
+                throw "Giris basarisiz ($err): $detail"
+            }
+
+            # Gecici ag/proxy hatasi: kod suresi dolana kadar birkac kez daha dene
+            $softFail++
+            $detail = @($desc, $raw) | Where-Object { $_ } | Select-Object -First 1
+            if ($softFail -ge 3) {
+                Write-Host ''
+                Write-Warn 'Token ucuna ust uste ulasilamadi. Kurumsal proxy veya TLS denetimi login.microsoftonline.com trafigini kesiyor olabilir.'
+                throw "Giris basarisiz (HTTP $code): $detail"
+            }
+            Write-Verbose "Yoklama gecici olarak basarisiz ($softFail/3, HTTP $code): $detail"
+            continue
         }
     }
     throw 'Cihaz kodu zaman asimina ugradi.'

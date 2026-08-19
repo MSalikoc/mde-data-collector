@@ -6,6 +6,39 @@ It signs in with your own account (device code), reads configuration and posture
 
 You hand that JSON file to whoever is performing the health check.
 
+## The whole thing, in order
+
+Run these in **PowerShell 7** (`pwsh`, black icon). Replace `YOUR-TENANT-ID` with the tenant GUID or
+`contoso.onmicrosoft.com` — without the `< >` brackets, which a shell treats as redirection.
+
+```powershell
+git clone https://github.com/MSalikoc/mde-data-collector.git
+```
+
+```powershell
+cd mde-data-collector
+```
+
+```powershell
+Get-ChildItem *.ps1 | Unblock-File; Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+```
+
+```powershell
+.\New-MdeApp.ps1 -TenantId YOUR-TENANT-ID -AppOnly
+```
+
+```powershell
+.\MDE-Collect.ps1 -TenantId YOUR-TENANT-ID
+```
+
+That is the entire collection. Step 4 leaves a single `mde-data-<tenant>-<date>.json` next to the
+scripts; send that file and nothing else. The sections below explain each step, the permissions
+involved and what to do when one of them fails.
+
+> `-AppOnly` is included above because tenants that enforce device-based Conditional Access need it
+> and tenants that do not are unaffected by it. It requires a **Global Administrator** for that one
+> command. See [Step 3](#step-3--app-registration-one-time).
+
 | File | Purpose |
 |---|---|
 | `New-MdeApp.ps1` | One-time setup: creates the Entra app registration with the read-only permissions |
@@ -26,7 +59,30 @@ Device inventory and sensor health, antivirus and attack surface reduction confi
 
 ---
 
-## Step 1 · Prerequisites
+## Step 1 · Get the files
+
+```powershell
+git clone https://github.com/MSalikoc/mde-data-collector.git
+```
+
+```powershell
+cd mde-data-collector
+```
+
+No git on the machine? Download the ZIP from the repository's **Code → Download ZIP** button and
+extract it. Windows extracts into a folder that contains *another* folder of the same name, so the
+scripts end up one level deeper than expected — `cd` until `dir` actually lists `MDE-Collect.ps1`
+before running anything.
+
+```powershell
+dir *.ps1
+```
+
+You should see `MDE-Collect.ps1`, `New-MdeApp.ps1` and `Test-Parse.ps1`. If the list is empty you are
+in the wrong folder, and every command below will fail with *"is not recognized as a name of a cmdlet,
+function, script file, or executable program"*.
+
+## Step 2 · Prerequisites
 
 **PowerShell 7+.** The "Windows PowerShell 5.1" that ships with Windows (blue icon) cannot run these scripts.
 
@@ -64,11 +120,11 @@ Optional sanity check:
 |---|---|
 | **Security Reader** | Defender data: alerts, incidents, Secure Score, vulnerabilities, Advanced Hunting |
 | **Global Reader** | Licences, directory roles, Conditional Access, Intune policies |
-| **Global Administrator** | Step 2 only (app registration and consent), one time |
+| **Global Administrator** | Step 3 only (app registration and consent), one time |
 
 > If Defender RBAC is enabled, the account must have access to all device groups. Otherwise the inventory and vulnerability figures come back partial.
 
-## Step 2 · App registration (one time)
+## Step 3 · App registration (one time)
 
 The collector authenticates as a public client. Create the registration and grant consent with one command:
 
@@ -126,7 +182,7 @@ Watch the console: it prints `N uygulama izni atandi (toplam 7)`. If N is not 7,
 
 An empty result is not the same as a blocked one, and it is the more dangerous of the two: a report that says "no security recommendations" reads as good news. If **Defender RBAC** is enabled, the collecting identity — user or application — must be scoped to all device groups, otherwise the API answers successfully with nothing. The collector now says so when recommendations come back empty. Widen the scope and collect again before accepting a zero.
 
-## Step 3 · Collect
+## Step 4 · Collect
 
 ```powershell
 .\MDE-Collect.ps1 -TenantId YOUR-TENANT-ID
@@ -154,7 +210,7 @@ A quick first run to confirm permissions before the full collection:
 | `-RawDumpPath .\raw` | Write the raw output of every API and KQL call to disk. Troubleshooting only — it contains device and user names |
 | `-Verbose` | Detailed progress |
 
-## Step 4 · Hand over the JSON
+## Step 5 · Hand over the JSON
 
 Send `mde-data-<tenant>-<date>.json` to the assessor. It is plain text — open it and review the contents before sending if you wish.
 
@@ -164,16 +220,19 @@ Send `mde-data-<tenant>-<date>.json` to the assessor. It is plain text — open 
 
 | Symptom | Cause / fix |
 |---|---|
+| `.\New-MdeApp.ps1 ... is not recognized as a name of a cmdlet` | You are not in the folder that holds the scripts. Run `dir *.ps1` — if it lists nothing, `cd` into the extracted folder (a ZIP download nests a second folder of the same name inside the first). The scripts are **only** in this repository; the health-check repository holds the renderer and no collector |
 | `#Requires -Version 7.0` or syntax errors | You are on Windows PowerShell 5.1 → open `pwsh` |
 | `... is not digitally signed` | `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force` |
 | `no such file or directory: <tenant>` | Remove the `< >` characters — they were placeholders |
-| `AADSTS65001` / `invalid_client` | App registration missing or consent not granted → Step 2 |
-| Most calls return `403` | The token has no Defender permissions → Step 2. The script lists what is missing before it starts |
+| `AADSTS65001` / `invalid_client` | App registration missing or consent not granted → Step 3 |
+| Most calls return `403` | The token has no Defender permissions → Step 3. The script lists what is missing before it starts |
 | `403` only on securitycenter calls | Continue with `-GraphOnly`; the exposure score will be absent |
-| `AADSTS50131: Device is not in required device state` | A Conditional Access policy requires a registered or compliant device, which a device code sign-in can never present. Re-run Step 2 with `-AppOnly` — application identities have no device to evaluate. Being excluded from *a* policy is not enough: another policy may scope the Defender app specifically. To find which one, search the Entra sign-in logs by the Correlation ID printed in the error and read the Conditional Access tab |
+| `AADSTS50131: Device is not in required device state` | A Conditional Access policy requires a registered or compliant device, which a device code sign-in can never present. Re-run Step 3 with `-AppOnly` — application identities have no device to evaluate. Being excluded from *a* policy is not enough: another policy may scope the Defender app specifically. To find which one, search the Entra sign-in logs by the Correlation ID printed in the error and read the Conditional Access tab |
 | Same error *with* a client secret in place | The secret has expired or consent was never granted for the application permissions → re-run `New-MdeApp.ps1 -AppOnly` |
 | Recommendations or indicators return zero rows | Not a permission problem — see [empty rather than failing](#if-a-section-comes-back-empty-rather-than-failing) |
 | Advanced Hunting returns nothing | `ThreatHunting.Read.All` consent missing, or Defender RBAC is restricting the account |
+| `Giris basarisiz (HTTP ...)` during the app registration | The token endpoint could not be reached three times running — usually a corporate proxy or TLS inspection sitting in front of `login.microsoftonline.com`. The message now carries the underlying network error |
+| `Giris basarisiz (invalid_client)` / `(unauthorized_client)` | The tenant does not allow the default bootstrap app (Azure CLI). Register your own public client and pass `-BootstrapClientId <app-id>` |
 | Alert collection takes too long | Use `-AlertDays 30` |
 
 ## Notes
