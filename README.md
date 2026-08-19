@@ -12,11 +12,11 @@ Run these in **PowerShell 7** (`pwsh`, black icon). Replace `YOUR-TENANT-ID` wit
 `contoso.onmicrosoft.com` — without the `< >` brackets, which a shell treats as redirection.
 
 ```powershell
-git clone https://github.com/MSalikoc/mde-data-collector.git
+Invoke-WebRequest https://github.com/MSalikoc/mde-data-collector/archive/refs/heads/main.zip -OutFile mde-collector.zip
 ```
 
 ```powershell
-cd mde-data-collector
+Expand-Archive mde-collector.zip -DestinationPath . -Force; cd mde-data-collector-main
 ```
 
 ```powershell
@@ -61,18 +61,26 @@ Device inventory and sensor health, antivirus and attack surface reduction confi
 
 ## Step 1 · Get the files
 
+This runs on a machine inside the customer's environment, which usually has no developer tooling, so
+the default is a plain download — **no git required**:
+
 ```powershell
-git clone https://github.com/MSalikoc/mde-data-collector.git
+Invoke-WebRequest https://github.com/MSalikoc/mde-data-collector/archive/refs/heads/main.zip -OutFile mde-collector.zip
 ```
 
 ```powershell
-cd mde-data-collector
+Expand-Archive mde-collector.zip -DestinationPath . -Force
 ```
 
-No git on the machine? Download the ZIP from the repository's **Code → Download ZIP** button and
-extract it. Windows extracts into a folder that contains *another* folder of the same name, so the
-scripts end up one level deeper than expected — `cd` until `dir` actually lists `MDE-Collect.ps1`
-before running anything.
+```powershell
+cd mde-data-collector-main
+```
+
+If git *is* available, `git clone https://github.com/MSalikoc/mde-data-collector.git` followed by
+`cd mde-data-collector` does the same thing and makes later updates a single `git pull`.
+
+Downloading the ZIP through the browser instead works too, but Windows then extracts a folder that
+contains *another* folder of the same name, and the scripts sit one level deeper than expected.
 
 ```powershell
 dir *.ps1
@@ -178,6 +186,38 @@ Watch the console: it prints `N uygulama izni atandi (toplam 7)`. If N is not 7,
 
 > `.mde-app.json` now contains a credential to the tenant. It is excluded by `.gitignore`. Delete the app registration when the engagement is finished.
 
+### Behind a corporate proxy or TLS inspection
+
+If the very first command fails with *"Unable to read data from the transport connection"*, *"an
+established connection was aborted by the software in your host machine"* or an SSL error, the
+machine cannot reach `login.microsoftonline.com` at all. Nothing about the tenant, the account or
+the permissions is involved yet. Check in this order:
+
+```powershell
+Test-NetConnection login.microsoftonline.com -Port 443
+```
+
+```powershell
+(Invoke-WebRequest https://login.microsoftonline.com -UseBasicParsing).StatusCode
+```
+
+If those fail too, it is the network or the endpoint software, not the script. Both scripts accept
+an explicit proxy, because PowerShell does not always inherit the system one and never inherits
+credentials for an authenticated proxy:
+
+```powershell
+.\New-MdeApp.ps1 -TenantId YOUR-TENANT-ID -AppOnly -Proxy http://proxy.corp:8080 -ProxyUseDefaultCredentials
+```
+
+```powershell
+.\MDE-Collect.ps1 -TenantId YOUR-TENANT-ID -Proxy http://proxy.corp:8080 -ProxyUseDefaultCredentials
+```
+
+Where TLS inspection is in force, the interception certificate must be trusted by the machine, and
+`login.microsoftonline.com` is usually better excluded from inspection altogether. Endpoint
+protection and DLP agents can abort the connection in the same way — that is what "aborted by the
+software in your host machine" is telling you.
+
 ### If a section comes back empty rather than failing
 
 An empty result is not the same as a blocked one, and it is the more dangerous of the two: a report that says "no security recommendations" reads as good news. If **Defender RBAC** is enabled, the collecting identity — user or application — must be scoped to all device groups, otherwise the API answers successfully with nothing. The collector now says so when recommendations come back empty. Widen the scope and collect again before accepting a zero.
@@ -231,6 +271,7 @@ Send `mde-data-<tenant>-<date>.json` to the assessor. It is plain text — open 
 | Same error *with* a client secret in place | The secret has expired or consent was never granted for the application permissions → re-run `New-MdeApp.ps1 -AppOnly` |
 | Recommendations or indicators return zero rows | Not a permission problem — see [empty rather than failing](#if-a-section-comes-back-empty-rather-than-failing) |
 | Advanced Hunting returns nothing | `ThreatHunting.Read.All` consent missing, or Defender RBAC is restricting the account |
+| `Unable to read data from the transport connection` / `aborted by the software in your host machine` | The machine cannot reach `login.microsoftonline.com`. Proxy, TLS inspection or endpoint software — see [behind a corporate proxy](#behind-a-corporate-proxy-or-tls-inspection) |
 | `Giris basarisiz (HTTP ...)` during the app registration | The token endpoint could not be reached three times running — usually a corporate proxy or TLS inspection sitting in front of `login.microsoftonline.com`. The message now carries the underlying network error |
 | `Giris basarisiz (invalid_client)` / `(unauthorized_client)` | The tenant does not allow the default bootstrap app (Azure CLI). Register your own public client and pass `-BootstrapClientId <app-id>` |
 | Alert collection takes too long | Use `-AlertDays 30` |

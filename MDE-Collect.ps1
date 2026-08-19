@@ -42,10 +42,23 @@ param(
     [switch]$GraphOnly,
 
     # Ham API çıktılarını da ayrı bir klasöre yaz (sorun gidermek için)
-    [string]$RawDumpPath
+    [string]$RawDumpPath,
+
+    # Kurumsal ag: PowerShell sistem proxy'sini her zaman devralmaz
+    [string]$Proxy,
+    [switch]$ProxyUseDefaultCredentials
 )
 
 $ErrorActionPreference = 'Stop'
+
+if ($Proxy) {
+    $PSDefaultParameterValues['Invoke-RestMethod:Proxy'] = $Proxy
+    $PSDefaultParameterValues['Invoke-WebRequest:Proxy'] = $Proxy
+}
+if ($ProxyUseDefaultCredentials) {
+    $PSDefaultParameterValues['Invoke-RestMethod:ProxyUseDefaultCredentials'] = $true
+    $PSDefaultParameterValues['Invoke-WebRequest:ProxyUseDefaultCredentials'] = $true
+}
 
 # New-MdeApp.ps1 bir app kaydi olusturduysa ClientId'yi oradan al
 if (-not $PSBoundParameters.ContainsKey('ClientId')) {

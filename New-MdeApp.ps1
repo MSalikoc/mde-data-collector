@@ -37,11 +37,26 @@ param(
     # Bu adimda yalnizca dizin yazma yetkisi gerekir; sonrasinda kullanilmaz.
     [string]$BootstrapClientId = '04b07795-8ddb-461a-bbee-02f9e1bf7b46',
 
+    # Kurumsal ag: acikca proxy verilmesi gerekebilir. PowerShell sistem proxy'sini
+    # her zaman devralmaz, kimlik dogrulamali proxy'lerde ise hic devralmaz.
+    [string]$Proxy,
+    [switch]$ProxyUseDefaultCredentials,
+
     [string]$OutFile = './.mde-app.json'
 )
 
 $ErrorActionPreference = 'Stop'
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
+
+# Proxy ayarini tek yerden butun HTTP cagrilarina uygula - cagri basina tekrar etmeye gerek yok
+if ($Proxy) {
+    $PSDefaultParameterValues['Invoke-RestMethod:Proxy'] = $Proxy
+    $PSDefaultParameterValues['Invoke-WebRequest:Proxy'] = $Proxy
+}
+if ($ProxyUseDefaultCredentials) {
+    $PSDefaultParameterValues['Invoke-RestMethod:ProxyUseDefaultCredentials'] = $true
+    $PSDefaultParameterValues['Invoke-WebRequest:ProxyUseDefaultCredentials'] = $true
+}
 
 $GRAPH_APPID = '00000003-0000-0000-c000-000000000000'
 $MDE_APPID   = 'fc780465-2017-40d4-a0c5-307022471b92'
@@ -97,8 +112,30 @@ function Get-GraphToken {
         client_id = $BootstrapClientId
         scope     = 'https://graph.microsoft.com/.default offline_access'
     }
-    $dc = Invoke-RestMethod -Method Post -Body $body `
-        -Uri "https://login.microsoftonline.com/$TenantId/oauth2/v2.0/devicecode"
+    # Ilk cagri. Burada duserse sorun tenant, izin ya da hesap degildir - makine
+    # login.microsoftonline.com'a hic ulasamiyordur. Ham .NET taşıma hatasini oldugu
+    # gibi birakmak yerine nereye bakilacagini soyluyoruz.
+    try {
+        $dc = Invoke-RestMethod -Method Post -Body $body `
+            -Uri "https://login.microsoftonline.com/$TenantId/oauth2/v2.0/devicecode"
+    }
+    catch {
+        $m = $_.Exception.Message
+        # "connection was aborted by the software in your host machine" = WSAECONNABORTED:
+        # baglantiyi uzak taraf degil, yereldeki bir sey kesiyor.
+        if ($m -match 'transport connection|aborted by the software|SSL connection|actively refused|No such host') {
+            Write-Host ''
+            Write-Warn 'login.microsoftonline.com adresine ulasilamadi - bu bir kimlik/izin sorunu degil, ag sorunu.'
+            Write-Host '    Sirasiyla kontrol edin:' -ForegroundColor Yellow
+            Write-Host '      1) Test-NetConnection login.microsoftonline.com -Port 443' -ForegroundColor Gray
+            Write-Host '      2) (Invoke-WebRequest https://login.microsoftonline.com -UseBasicParsing).StatusCode' -ForegroundColor Gray
+            Write-Host '      3) Proxy arkasindaysaniz: -Proxy http://proxy:8080 -ProxyUseDefaultCredentials' -ForegroundColor Gray
+            Write-Host '      4) Uc nokta korumasi / DLP / TLS denetimi bu trafigi kesiyor olabilir' -ForegroundColor Gray
+            Write-Host ''
+            throw "Kimlik dogrulama ucuna baglanilamadi: $m"
+        }
+        throw
+    }
 
     Write-Host ''
     Write-Host '  ------------------------------------------------------------' -ForegroundColor Yellow
