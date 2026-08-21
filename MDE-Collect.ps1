@@ -977,8 +977,11 @@ if ($pol) {
 
             if ($json -match 'excluded(path|extension|process)') {
                 foreach ($m in [regex]::Matches($json, '"value"\s*:\s*"([^"]{3,})"')) {
-                    $v = $m.Groups[1].Value
-                    if ($v -match '\\|\.\w{2,4}$') { $exclusions.Add([pscustomobject][ordered]@{ policy = $p.name; value = $v }) }
+                    # Intune degerleri sik sik bastaki/sondaki bosluklarla geliyor. Trim
+                    # sart: "^\w:\\?$" gibi capali desenler tek bir bosluk yuzunden
+                    # eslesmiyor ve surucu koku exclusion'lari fark edilmeden geciyordu.
+                    $v = $m.Groups[1].Value.Trim()
+                    if ($v -and $v -match '\\|\.\w{2,4}$') { $exclusions.Add([pscustomobject][ordered]@{ policy = $p.name; value = $v }) }
                 }
             }
 
@@ -1019,7 +1022,22 @@ if ($pol) {
     }
     if ($exclusions.Count) {
         $data.tables.avExclusions = @($exclusions | Sort-Object value -Unique)
-        $risky = @($data.tables.avExclusions | Where-Object { $_.value -match '^\w:\\?$|\*|AppData|Temp|Users\\' })
+        # Neden riskli oldugunu da yaz - "412 yuksek riskli" demek tek basina
+        # danismanin isine yaramiyor, hangi turden oldugunu gormesi gerekiyor.
+        foreach ($e in $data.tables.avExclusions) {
+            $r = switch -Regex ($e.value) {
+                '^\w:\\?$'                   { 'Entire drive'; break }
+                '^\.\w{1,6}$'                { 'Extension only - applies everywhere'; break }
+                '\*'                         { 'Wildcard'; break }
+                'AppData|\\Temp\\|\\Temp$'   { 'User-writable path'; break }
+                '\\Users\\'                  { 'User profile path'; break }
+                'ProgramData'                { 'ProgramData - commonly user-writable'; break }
+                'HarddiskVolume'             { 'Raw device / shadow copy path'; break }
+                default                      { '' }
+            }
+            $e | Add-Member -NotePropertyName risk -NotePropertyValue $r -Force
+        }
+        $risky = @($data.tables.avExclusions | Where-Object { $_.risk })
         $data.kpi['Exclusion count'] = $data.tables.avExclusions.Count
         $data.kpi['High-risk exclusions'] = $risky.Count
         Write-Ok "$($data.tables.avExclusions.Count) exclusion ($($risky.Count) yüksek riskli)"
@@ -1151,7 +1169,12 @@ if ($null -ne $blk -and $blk -lt 8) {
     Add-Finding "Only $([int]$blk) attack surface reduction rules are enforced in block mode$(if ($aud -gt 0) { "; $([int]$aud) remain in audit mode and permit the technique they detect" })" 'ASR' 'High'
 }
 if ($data.tables.avExclusions -and $data.kpi['High-risk exclusions'] -gt 0) {
-    Add-Finding "$($data.kpi['High-risk exclusions']) high-risk antivirus exclusions (drive root, user-writable path or wildcard)" 'Protection' 'High'
+    # Tur dokumu olmadan "413 yuksek riskli exclusion" cumlesi bir ise yaramiyor
+    $byRisk = @($data.tables.avExclusions | Where-Object { $_.risk } | Group-Object risk |
+                Sort-Object Count -Descending | ForEach-Object { "$($_.Count) $($_.Name.ToLower())" })
+    $sev = if ($data.tables.avExclusions | Where-Object { $_.risk -eq 'Entire drive' }) { 'Critical' } else { 'High' }
+    Add-Finding ("$($data.kpi['High-risk exclusions']) high-risk antivirus exclusions - " +
+                 ($byRisk -join ', ')) 'Protection' $sev
 }
 
 $crit = NumOf 'Critical CVEs'
