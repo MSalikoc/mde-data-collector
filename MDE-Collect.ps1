@@ -738,10 +738,31 @@ if ($ss) {
     $data.charts['Secure Score breakdown by category (points achieved vs. opportunity)'] =
         @($byCat | ForEach-Object { , @($_.cat, [double]$_.achieved, 0) })
 
+    # "Score impact" kazanilabilecek puandir, mevcut puan degil. controlScores yalnizca
+    # mevcut puani tasir (bu listede tanimi geregi ~0), tavan degeri ayri uctan gelir.
+    # Alinamazsa impact bos kalir - uydurmaktansa bos birakiyoruz.
+    $maxByControl = @{}
+    $profiles = Try-Api { Invoke-Api -All -Uri 'https://graph.microsoft.com/v1.0/security/secureScoreControlProfiles' } 'secure score control profiles'
+    foreach ($p in @($profiles)) {
+        foreach ($k in @($p.id, $p.controlName)) {
+            if ($k -and -not $maxByControl.ContainsKey($k)) { $maxByControl[$k] = [double]$p.maxScore }
+        }
+    }
     $data.tables.secureScoreActions = @($cur.controlScores | Where-Object { $_.score -lt 1 } |
         Sort-Object score | Select-Object -First 10 | ForEach-Object {
-            [ordered]@{ action = $_.controlName; category = $_.controlCategory; score = $_.score; state = $_.implementationStatus }
+            $max = $null
+            foreach ($k in @($_.controlName, $_.controlCategory)) {
+                if ($k -and $maxByControl.ContainsKey($k)) { $max = $maxByControl[$k]; break }
+            }
+            $impact = if ($null -ne $max) { [math]::Round($max - [double]$_.score, 1) } else { $null }
+            [ordered]@{
+                action = $_.controlName; category = $_.controlCategory
+                score = $_.score; impact = $impact; state = $_.implementationStatus
+            }
         })
+    if ($maxByControl.Count -eq 0) {
+        Write-Skip 'Secure score control profiles were not readable, so the score impact column stays empty.'
+    }
     Write-Ok "Secure Score: $($data.meta.secureScore) (%$pct)"
 }
 
