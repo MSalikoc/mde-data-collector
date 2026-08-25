@@ -453,7 +453,7 @@ if ($skus) {
 Write-Step 'Cihaz envanteri ve sensör sağlığı (Advanced Hunting)'
 $q = @"
 DeviceInfo
-| where Timestamp > ago(14d)
+| where Timestamp > ago(30d)
 | summarize arg_max(Timestamp, *) by DeviceId
 | summarize Devices = count() by OSPlatform, OnboardingStatus, SensorHealthState
 "@
@@ -503,7 +503,7 @@ if ($inv.Count) {
 # OS sürüm bazında envanter tablosu
 $q = @"
 DeviceInfo
-| where Timestamp > ago(14d)
+| where Timestamp > ago(30d)
 | summarize arg_max(Timestamp, *) by DeviceId
 | extend Family = case(
     OSPlatform startswith "Windows11", "Windows 11",
@@ -928,13 +928,19 @@ if ($ver.Count) {
         if (-not $groups) { return $null }
         $sorted = @($groups | Sort-Object { [version]($_.v -replace '[^0-9.]','0') } -Descending -ErrorAction SilentlyContinue)
         if (-not $sorted) { $sorted = @($groups | Sort-Object n -Descending) }
-        $latest = $sorted[0]
-        $behind = ($groups | Where-Object { $_.v -ne $latest.v } | Measure-Object n -Sum).Sum
+        $highest = $sorted[0]
+        $behind = ($groups | Where-Object { $_.v -ne $highest.v } | Measure-Object n -Sum).Sum
+        $total = ($groups | Measure-Object n -Sum).Sum
+        # Bilinen tek sey ORTAMDA GORULEN en yuksek surum. Microsoft'un yayinladigi son
+        # surum API'den okunamaz. Ikisini karistirmak, tum estate bir yil geride oldugunda
+        # "hepsi guncel" demek olur - o yuzden latest bos kalir, danisman surum notlarindan
+        # doldurur; behind ise "en yuksek surumde OLMAYAN cihaz" anlamina gelir.
         [pscustomobject]@{
             component = $Label
             current   = ($groups | Sort-Object n -Descending | Select-Object -First 1).v
-            latest    = $latest.v
+            latest    = ''
             behind    = [int]$behind
+            observed  = "$($groups.Count) distinct build$(if ($groups.Count -ne 1) { 's' }) across $total devices; highest seen $($highest.v)"
         }
     }
     $rows = @(VerRow 'AvPlatform' 'Defender AV platform version'; VerRow 'AvEngine' 'Antimalware engine version'; VerRow 'AvSig' 'Security intelligence (signature) version') |
