@@ -232,7 +232,14 @@ function Get-Token {
             $script:Tokens[$Api] = $t
         }
         else {
-            $script:Tokens[$Api] = Get-DeviceCodeToken -Resource $res
+            # Graph da secret varsa app-only gider. Cihaz kodu akisi yalnizca "Allow public
+            # client flows" acik uygulamalarda calisir; kapaliysa AADSTS7000218 ile duser ve
+            # secret vermek Defender tarafini kurtarsa da Graph'i kurtarmiyordu. Ayrica
+            # app-only, cihaz durumu sarti koyan Conditional Access politikalarindan da etkilenmez.
+            $t = $null
+            if ($ClientSecret) { $t = Get-AppOnlyToken -Resource $res }
+            if (-not $t) { $t = Get-DeviceCodeToken -Resource $res }
+            $script:Tokens[$Api] = $t
         }
         Test-TokenScope -Api $Api -Token $script:Tokens[$Api]
     }
@@ -243,6 +250,8 @@ function Get-Token {
 function Test-TokenScope {
     param([string]$Api, [string]$Token)
 
+    # Graph izin adlari delegated ve application tarafinda ayni; app-only'de bunlar
+    # 'roles' claim'inde gelir, Test-TokenScope ikisine de bakiyor.
     $required = if ($Api -eq 'graph') {
         @('ThreatHunting.Read.All', 'SecurityEvents.Read.All', 'SecurityAlert.Read.All',
           'SecurityIncident.Read.All', 'CustomDetection.Read.All',
