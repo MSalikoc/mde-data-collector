@@ -51,6 +51,11 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# Uretilen JSON operatörün yerel ayarina bagli OLMAMALI. Turkce Windows'ta
+# '{0:N0}' -f 33426200 -> "33.426.200" yaziyordu ve renderer bunu sayiya
+# ceviremeyip tamamen duruyordu. Bicimlendirmenin tamami invariant kulturde.
+[Threading.Thread]::CurrentThread.CurrentCulture = [Globalization.CultureInfo]::InvariantCulture
+
 if ($Proxy) {
     $PSDefaultParameterValues['Invoke-RestMethod:Proxy'] = $Proxy
     $PSDefaultParameterValues['Invoke-WebRequest:Proxy'] = $Proxy
